@@ -49,7 +49,7 @@ def align_inputs(self, inputs, cur_node, runtime_graph, llm_parameters_dict, **k
     return inputs
 
 
-def read_pdf(file):
+def read_pdf(file: str):
     from langchain.document_loaders import PyPDFLoader
 
     loader = PyPDFLoader(file)
@@ -95,29 +95,50 @@ def video2audio(
     return audio_base64
 
 
-def read_text_from_file(file, save_file_name):
+async def read_text_from_file(file: UploadFile):
+    ctype = file.headers["content-type"]
+    valid = (
+        "text/plain",
+        "application/pdf",
+        "application/octet-stream",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+
+    file_content = None
+    if ctype not in valid:
+        return file_content
+
+    import aiofiles
     import docx2txt
     from langchain.text_splitter import CharacterTextSplitter
 
     # read text file
-    if file.headers["content-type"] == "text/plain":
+    if ctype == "text/plain":
         file.file.seek(0)
         content = file.file.read().decode("utf-8")
-        # Split text
+        # Split text to multiple documents
         text_splitter = CharacterTextSplitter()
-        texts = text_splitter.split_text(content)
-        # Create multiple documents
-        file_content = texts
-    # read pdf file
-    elif file.headers["content-type"] == "application/pdf":
-        documents = read_pdf(save_file_name)
-        file_content = [doc.page_content for doc in documents]
-    # read docx file
-    elif (
-        file.headers["content-type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        or file.headers["content-type"] == "application/octet-stream"
-    ):
-        file_content = docx2txt.process(save_file_name)
+        return text_splitter.split_text(content)
+
+    # need a tmp file for rest
+    async with aiofiles.tempfile.NamedTemporaryFile() as tmp:
+        await tmp.write(await file.read())
+        await tmp.flush()
+
+        # read pdf file
+        if ctype == "application/pdf":
+            documents = read_pdf(tmp.name)
+            file_content = [doc.page_content for doc in documents]
+
+        # read docx file
+        if ctype in (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/octet-stream"
+        ):
+            file_content = docx2txt.process(tmp.name)
+
+        # remove temp file
+        await tmp.close()
 
     return file_content
 
@@ -182,11 +203,6 @@ class DocSumService:
             file_summaries = []
             if files:
                 for file in files:
-                    # Fix concurrency issue with the same file name
-                    # https://github.com/opea-project/GenAIExamples/issues/1279
-                    uid = str(uuid.uuid4())
-                    file_path = f"/tmp/{uid}"
-
                     if data_type is not None and data_type in ["audio", "video"]:
                         raise ValueError(
                             "Audio and Video file uploads are not supported in docsum with curl request, \
@@ -194,13 +210,7 @@ class DocSumService:
                         )
 
                     else:
-                        import aiofiles
-
-                        async with aiofiles.open(file_path, "wb") as f:
-                            await f.write(await file.read())
-
-                        docs = read_text_from_file(file, file_path)
-                        os.remove(file_path)
+                        docs = read_text_from_file(file)
 
                         if isinstance(docs, list):
                             file_summaries.extend(docs)
